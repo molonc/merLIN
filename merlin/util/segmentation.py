@@ -532,7 +532,7 @@ def segment_using_cellpose(imageStackIn: np.ndarray,
             channelName == 'cd45',
             channelName == 'wga',
             channelName == 'cona']):
-        model = models.Cellpose(gpu=False, model_type='cyto')
+        model = models.Cellpose(gpu=False, model_type='cyto2')
 
     # define CHANNELS to run segementation on
     # grayscale=0, R=1, G=2, B=3
