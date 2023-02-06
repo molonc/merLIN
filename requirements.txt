@@ -22,7 +22,7 @@ pytest-cov
 h5py>=1.8.15
 numexpr>=2.6.2
 cython>=0.21
-snakemake==5.26.1
+snakemake==7.8.5
 requests>=2.18.0
 tables
 boto3
