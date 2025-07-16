@@ -245,10 +245,10 @@ class PixelBasedDecoder(object):
 
         fullDF = pandas.concat([df, intensities], 1)
         fullDF = fullDF[(fullDF['x'].between(cropWidth,
-                                             decodedImage.shape[0] - cropWidth,
+                                             decodedImage.shape[1] - cropWidth,
                                              inclusive=False)) &
                         (fullDF['y'].between(cropWidth,
-                                             decodedImage.shape[1] - cropWidth,
+                                             decodedImage.shape[0] - cropWidth,
                                              inclusive=False)) &
                         (fullDF['area'] >= minimumArea)]
 
