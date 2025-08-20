@@ -264,9 +264,10 @@ class OptimizeIteration(decode.BarcodeSavingParallelAnalysisTask):
                             codebook.get_barcode(cBC['barcode_id']))[0]
 
                         # TODO this can be done by crop width when decoding
+                        # Correct bounds: shape[2] = width (X), shape[1] = height (Y)
                         if cBC['x'] > 10 and cBC['y'] > 10 \
-                                and warpedImages.shape[1]-cBC['x'] > 10 \
-                                and warpedImages.shape[2]-cBC['y'] > 10:
+                                and warpedImages.shape[2]-cBC['x'] > 10 \
+                                and warpedImages.shape[1]-cBC['y'] > 10:
 
                             refinedPositions = np.array(
                                 [registration.refine_position(
