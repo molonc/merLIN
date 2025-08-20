@@ -299,9 +299,19 @@ class OptimizeIteration(decode.BarcodeSavingParallelAnalysisTask):
                     goodIndexes = [i for i, x in enumerate(v2) if
                                    not any(np.isnan(x[1])) and not any(
                                        np.isinf(x[1]))]
-                    tForm.estimate(
-                        np.array([v2[i][0] for i in goodIndexes]),
-                        np.array([v2[i][0] + v2[i][1] for i in goodIndexes]))
+                    # Build per-color-pair transform from barcode observations.
+                    # v2 is a list of entries like: [ [x, y], [dx, dy] ]
+                    # tForm.estimate(
+                    #     np.array([v2[i][0] for i in goodIndexes]),
+                    #     np.array([v2[i][0] + v2[i][1] for i in goodIndexes]))
+                    # Keep only finite displacements, and fit only when we have enough pairs.
+                    # skimage SimilarityTransform.estimate expects (N,2); using np.stack ensures 2-D shape.
+                    # If N < 2, leave tForm as identity to avoid IndexError and carry forward previous transform.
+                    if len(goodIndexes) >= 2:
+                        src = np.stack([v2[i][0] for i in goodIndexes], axis=0).astype(float)
+                        dst = np.stack([v2[i][0] + v2[i][1] for i in goodIndexes], axis=0).astype(float)
+                        tForm.estimate(src, dst)
+                        
                     tForms[k][k2] = tForm + previousTransformations[k][k2]
 
             self.dataSet.save_pickle_analysis_result(
