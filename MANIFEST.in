@@ -1,0 +1,12 @@
+recursive-include merlin *.py
+
+include merlin/ext/default.mplstyle
+include setup.py
+include CHANGELOG.md
+include license.md
+include README.md
+include requirements.txt
+include MANIFEST.in
+
+recursive-exclude * __pycache__
+recursive-exclude * *.py[co]
