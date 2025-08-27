@@ -98,8 +98,8 @@ def radial_center(imageIn) -> Tuple[float, float]:
     Ny, Nx = imageIn.shape
     xm_onerow = np.arange(-(Nx - 1) / 2.0 + 0.5, (Nx) / 2.0 - 0.5)
     xm = np.tile(xm_onerow, (Ny - 1, 1))
-    ym_onecol = [np.arange(-(Nx - 1) / 2.0 + 0.5, (Nx) / 2.0 - 0.5)]
-    ym = np.tile(ym_onecol, (Nx - 1, 1)).transpose()
+    ym_onecol = [np.arange(-(Ny - 1) / 2.0 + 0.5, (Nx) / 2.0 - 0.5)]
+    ym = np.tile(ym_onecol[:, np.newaxis], (1, Nx - 1))
 
     imageIn = imageIn.astype(float)
 
