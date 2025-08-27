@@ -1,0 +1,32 @@
+# Env/IDE
+.env
+.idea
+*.swo
+*.swp
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+
+# Packaging junk
+*.egg-info/
+*.egg
+dist/
+build/
+pip-log.txt
+pip-delete-this-directory.txt
+
+# MERlin runtime outputs
+merlin_data/
+analysis*/
+analyses*/
+Optimize*/
+log/
+results/
+barcodes/
+
+# Binary caches / artifacts
+*.pkl
+*.joblib
+*.npz
+*.npy
+*.h5
