@@ -82,6 +82,10 @@ class OptimizeIteration(decode.BarcodeSavingParallelAnalysisTask):
         chromaticTransformations = \
             self._get_previous_chromatic_transformations()
 
+        # Add validation for scale factors and backgrounds
+        scaleFactors = self._validate_and_fix_array(scaleFactors, "scale_factors")
+        backgrounds = self._validate_and_fix_array(backgrounds, "backgrounds")
+
         self.dataSet.save_numpy_analysis_result(
             scaleFactors, 'previous_scale_factors', self.analysisName,
             resultIndex=fragmentIndex)
@@ -100,11 +104,31 @@ class OptimizeIteration(decode.BarcodeSavingParallelAnalysisTask):
         warpedImages = preprocessTask.get_processed_image_set(
             fovIndex, zIndex=zIndex, chromaticCorrector=chromaticCorrector)
 
+        # Validate warped images before decoding
+        warpedImages = self._validate_and_fix_array(warpedImages, "warped_images")
+
         decoder = decoding.PixelBasedDecoder(codebook)
         areaThreshold = self.parameters['area_threshold']
         decoder.refactorAreaThreshold = areaThreshold
-        di, pm, npt, d = decoder.decode_pixels(warpedImages, scaleFactors,
-                                               backgrounds)
+        
+        try:
+            di, pm, npt, d = decoder.decode_pixels(warpedImages, scaleFactors,
+                                                   backgrounds)
+        except ValueError as e:
+            logger = self.dataSet.get_logger(self)
+            logger.warning(f"Decode pixels failed for fragment {fragmentIndex}: {e}")
+            # Return zero refactors if decoding fails
+            bitCount = codebook.get_bit_count()
+            self.dataSet.save_numpy_analysis_result(
+                np.ones(bitCount), 'scale_refactors', self.analysisName,
+                resultIndex=fragmentIndex)
+            self.dataSet.save_numpy_analysis_result(
+                np.zeros(bitCount), 'background_refactors', self.analysisName,
+                resultIndex=fragmentIndex)
+            self.dataSet.save_numpy_analysis_result(
+                np.zeros(codebook.get_barcode_count()), 'barcode_counts', 
+                self.analysisName, resultIndex=fragmentIndex)
+            return
 
         refactors, backgrounds, barcodesSeen = \
             decoder.extract_refactors(
@@ -130,6 +154,26 @@ class OptimizeIteration(decode.BarcodeSavingParallelAnalysisTask):
             barcodesSeen, 'barcode_counts', self.analysisName,
             resultIndex=fragmentIndex)
 
+    def _validate_and_fix_array(self, arr, name):
+        """Validate array and fix NaN/Inf values"""
+        if np.any(np.isnan(arr)):
+            logger = self.dataSet.get_logger(self)
+            logger.warning(f"{name} contains NaN values. Replacing with zeros.")
+            arr = np.nan_to_num(arr, nan=0.0)
+        
+        if np.any(np.isinf(arr)):
+            logger = self.dataSet.get_logger(self)
+            logger.warning(f"{name} contains Inf values. Clipping to float32 range.")
+            arr = np.nan_to_num(arr, posinf=np.finfo(np.float32).max, 
+                              neginf=np.finfo(np.float32).min)
+        
+        # Ensure values are within float32 range
+        float32_max = np.finfo(np.float32).max
+        float32_min = np.finfo(np.float32).min
+        arr = np.clip(arr, float32_min, float32_max)
+        
+        return arr.astype(np.float32)
+
     def _get_used_colors(self) -> List[str]:
         dataOrganization = self.dataSet.get_data_organization()
         codebook = self.get_codebook()
@@ -146,11 +190,14 @@ class OptimizeIteration(decode.BarcodeSavingParallelAnalysisTask):
         pixelHistograms = preprocessTask.get_pixel_histogram()
         for i in range(bitCount):
             cumulativeHistogram = np.cumsum(pixelHistograms[i])
-            cumulativeHistogram = cumulativeHistogram/cumulativeHistogram[-1]
-            # Add two to match matlab code.
-            # TODO: Does +2 make sense? Used to be consistent with Matlab code
-            initialScaleFactors[i] = \
-                np.argmin(np.abs(cumulativeHistogram-0.9)) + 2
+            if cumulativeHistogram[-1] > 0:  # Avoid division by zero
+                cumulativeHistogram = cumulativeHistogram/cumulativeHistogram[-1]
+                # Add two to match matlab code.
+                # TODO: Does +2 make sense? Used to be consistent with Matlab code
+                initialScaleFactors[i] = \
+                    np.argmin(np.abs(cumulativeHistogram-0.9)) + 2
+            else:
+                initialScaleFactors[i] = 1.0  # Default safe value
 
         return initialScaleFactors
 
@@ -246,7 +293,6 @@ class OptimizeIteration(decode.BarcodeSavingParallelAnalysisTask):
                                       for u in usedColors}
 
             for fov in uniqueFOVs:
-
                 fovBarcodes = barcodes[barcodes['fov'] == fov]
                 zIndexes = np.unique(fovBarcodes['z'])
                 for z in zIndexes:
@@ -254,65 +300,106 @@ class OptimizeIteration(decode.BarcodeSavingParallelAnalysisTask):
                     # TODO this can be moved to the run function for the task
                     # so not as much repeated work is done when it is called
                     # from many different tasks in parallel
-                    warpedImages = np.array([warpTask.get_aligned_image(
-                        fov, dataOrganization.get_data_channel_for_bit(b),
-                        int(z),  previousCorrector)
-                        for b in codebook.get_bit_names()])
+                    try:
+                        warpedImages = np.array([warpTask.get_aligned_image(
+                            fov, dataOrganization.get_data_channel_for_bit(b),
+                            int(z), previousCorrector)
+                            for b in codebook.get_bit_names()])
+                    except Exception as e:
+                        logger = self.dataSet.get_logger(self)
+                        logger.warning(f"Failed to get warped images for FOV {fov}, z {z}: {e}")
+                        continue
 
                     for i, cBC in currentBarcodes.iterrows():
                         onBits = np.where(
                             codebook.get_barcode(cBC['barcode_id']))[0]
 
                         # TODO this can be done by crop width when decoding
-                        # Correct bounds: shape[2] = width (X), shape[1] = height (Y)
                         if cBC['x'] > 10 and cBC['y'] > 10 \
                                 and warpedImages.shape[2]-cBC['x'] > 10 \
                                 and warpedImages.shape[1]-cBC['y'] > 10:
 
-                            refinedPositions = np.array(
-                                [registration.refine_position(
-                                    warpedImages[i, :, :], cBC['x'], cBC['y'])
-                                    for i in onBits])
+                            refinedPositions = []
+                            for bit_idx in onBits:
+                                try:
+                                    pos = registration.refine_position(
+                                        warpedImages[bit_idx, :, :], cBC['x'], cBC['y'])
+                                    # Validate refined position
+                                    if not np.any(np.isnan(pos)) and not np.any(np.isinf(pos)):
+                                        refinedPositions.append(pos)
+                                    else:
+                                        refinedPositions.append(np.array([cBC['x'], cBC['y']]))
+                                except Exception:
+                                    refinedPositions.append(np.array([cBC['x'], cBC['y']]))
+                            
+                            refinedPositions = np.array(refinedPositions)
+                            
                             for p in itertools.combinations(
                                     enumerate(onBits), 2):
                                 c1 = dataOrganization.get_data_channel_color(
-                                    p[0][1])
+                                    dataOrganization.get_data_channel_for_bit(
+                                        codebook.get_bit_names()[p[0][1]]))
                                 c2 = dataOrganization.get_data_channel_color(
-                                    p[1][1])
+                                    dataOrganization.get_data_channel_for_bit(
+                                        codebook.get_bit_names()[p[1][1]]))
+
+                                displacement = refinedPositions[p[1][0]] - refinedPositions[p[0][0]]
+                                
+                                # Validate displacement
+                                if np.any(np.isnan(displacement)) or np.any(np.isinf(displacement)):
+                                    continue
+                                
+                                # Sanity check: displacement shouldn't be too large
+                                if np.linalg.norm(displacement) > 50:  # Adjust threshold as needed
+                                    continue
 
                                 if c1 < c2:
                                     colorPairDisplacements[c1][c2].append(
-                                        [np.array([cBC['x'], cBC['y']]),
-                                         refinedPositions[p[1][0]]
-                                         - refinedPositions[p[0][0]]])
+                                        [np.array([cBC['x'], cBC['y']]), displacement])
                                 else:
                                     colorPairDisplacements[c2][c1].append(
-                                        [np.array([cBC['x'], cBC['y']]),
-                                         refinedPositions[p[0][0]]
-                                         - refinedPositions[p[1][0]]])
+                                        [np.array([cBC['x'], cBC['y']]), -displacement])
 
             tForms = {}
             for k, v in colorPairDisplacements.items():
                 tForms[k] = {}
                 for k2, v2 in v.items():
                     tForm = transform.SimilarityTransform()
-                    goodIndexes = [i for i, x in enumerate(v2) if
-                                   not any(np.isnan(x[1])) and not any(
-                                       np.isinf(x[1]))]
-                    # Build per-color-pair transform from barcode observations.
-                    # v2 is a list of entries like: [ [x, y], [dx, dy] ]
-                    # tForm.estimate(
-                    #     np.array([v2[i][0] for i in goodIndexes]),
-                    #     np.array([v2[i][0] + v2[i][1] for i in goodIndexes]))
-                    # Keep only finite displacements, and fit only when we have enough pairs.
-                    # skimage SimilarityTransform.estimate expects (N,2); using np.stack ensures 2-D shape.
-                    # If N < 2, leave tForm as identity to avoid IndexError and carry forward previous transform.
+                    
+                    # Filter out invalid displacements
+                    goodIndexes = []
+                    for i, x in enumerate(v2):
+                        if (not np.any(np.isnan(x[1])) and 
+                            not np.any(np.isinf(x[1])) and
+                            np.linalg.norm(x[1]) < 50):  # Sanity check
+                            goodIndexes.append(i)
+                    
+                    # Need at least 2 points for similarity transform
                     if len(goodIndexes) >= 2:
-                        src = np.stack([v2[i][0] for i in goodIndexes], axis=0).astype(float)
-                        dst = np.stack([v2[i][0] + v2[i][1] for i in goodIndexes], axis=0).astype(float)
-                        tForm.estimate(src, dst)
-                        
-                    tForms[k][k2] = tForm + previousTransformations[k][k2]
+                        try:
+                            src = np.array([v2[i][0] for i in goodIndexes])
+                            dst = np.array([v2[i][0] + v2[i][1] for i in goodIndexes])
+                            
+                            # Final validation before estimation
+                            if (not np.any(np.isnan(src)) and not np.any(np.isnan(dst)) and
+                                not np.any(np.isinf(src)) and not np.any(np.isinf(dst))):
+                                tForm.estimate(src, dst)
+                            else:
+                                logger = self.dataSet.get_logger(self)
+                                logger.warning(f"Invalid src/dst for transform {k}->{k2}")
+                        except Exception as e:
+                            logger = self.dataSet.get_logger(self)
+                            logger.warning(f"Transform estimation failed for {k}->{k2}: {e}")
+                    else:
+                        logger = self.dataSet.get_logger(self)
+                        logger.info(f"Insufficient points ({len(goodIndexes)}) for transform {k}->{k2}")
+                    
+                    # Combine with previous transformation
+                    try:
+                        tForms[k][k2] = tForm + previousTransformations[k][k2]
+                    except Exception:
+                        # If addition fails, use the previous transformation
+                        tForms[k][k2] = previousTransformations[k][k2]
 
             self.dataSet.save_pickle_analysis_result(
                 tForms, 'chromatic_corrections', self.analysisName)
@@ -347,8 +434,18 @@ class OptimizeIteration(decode.BarcodeSavingParallelAnalysisTask):
                 'previous_scale_factors', self.analysisName, resultIndex=i)
                 for i in range(self.parameters['fov_per_iteration'])])
 
+            # Validate before computing median
+            refactors = self._validate_and_fix_array(refactors, "refactors")
+            previousFactors = self._validate_and_fix_array(previousFactors, "previousFactors")
+            
             scaleFactors = np.nanmedian(
                     np.multiply(refactors, previousFactors), axis=0)
+            
+            # Final validation
+            scaleFactors = self._validate_and_fix_array(scaleFactors, "final_scale_factors")
+            
+            # Ensure scale factors are reasonable (e.g., between 0.1 and 1000)
+            scaleFactors = np.clip(scaleFactors, 0.1, 1000)
 
             self.dataSet.save_numpy_analysis_result(
                 scaleFactors, 'scale_factors', self.analysisName)
@@ -379,9 +476,17 @@ class OptimizeIteration(decode.BarcodeSavingParallelAnalysisTask):
                 'previous_scale_factors', self.analysisName, resultIndex=i)
                 for i in range(self.parameters['fov_per_iteration'])])
 
+            # Validate arrays before computation
+            refactors = self._validate_and_fix_array(refactors, "background_refactors")
+            previousBackgrounds = self._validate_and_fix_array(previousBackgrounds, "prev_backgrounds")
+            previousFactors = self._validate_and_fix_array(previousFactors, "prev_factors_for_bg")
+
             backgrounds = np.nanmedian(np.add(
                 previousBackgrounds, np.multiply(refactors, previousFactors)),
                 axis=0)
+            
+            # Final validation
+            backgrounds = self._validate_and_fix_array(backgrounds, "final_backgrounds")
 
             self.dataSet.save_numpy_analysis_result(
                 backgrounds, 'backgrounds', self.analysisName)
